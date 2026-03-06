@@ -19,4 +19,5 @@ export const KNOWN_PROGRAMS: Record<string, string> = {
   MythSett1ement11111111111111111111111111111: "Settlement",
   MythToken1111111111111111111111111111111111: "MYTH Token",
   MythCompute111111111111111111111111111111111: "Compute Market",
+  GCmfmfV8LeVAsWBtHkwGvRU2r2gE37NWnHjMcQFyBV97: "Myth Names",
 };

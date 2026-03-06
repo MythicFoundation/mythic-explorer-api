@@ -9,6 +9,7 @@ import { accountsRoutes } from "./routes/accounts";
 import { tokensRoutes } from "./routes/tokens";
 import { programsRoutes } from "./routes/programs";
 import { bridgeRoutes } from "./routes/bridge";
+import { namesRoutes } from "./routes/names";
 
 async function main() {
   const app = Fastify({
@@ -32,6 +33,7 @@ async function main() {
   await app.register(tokensRoutes);
   await app.register(programsRoutes);
   await app.register(bridgeRoutes);
+  await app.register(namesRoutes);
 
   // Root redirect
   app.get("/", async (_req, reply) => {
@@ -52,6 +54,9 @@ async function main() {
         "/programs",
         "/bridge/stats",
         "/bridge/transactions",
+        "/name/:domain",
+        "/name/owner/:wallet",
+        "/names",
       ],
     });
   });
