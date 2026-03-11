@@ -2,6 +2,33 @@ import { FastifyInstance } from "fastify";
 import { connection } from "../rpc";
 import { cacheGet, cacheSet } from "../cache";
 
+const SUPPLY_ORACLE_URL = process.env.SUPPLY_ORACLE_URL || "http://127.0.0.1:4002";
+
+interface FeeOracleData {
+  recommendedFeeMYTH: number;
+  recommendedFeeLamports: number;
+  feeUSD: number;
+  mythPriceUSD: number;
+}
+
+let feeOracleCache: { data: FeeOracleData | null; ts: number } = { data: null, ts: 0 };
+
+async function getFeeOracle(): Promise<FeeOracleData | null> {
+  const now = Date.now();
+  if (feeOracleCache.data && now - feeOracleCache.ts < 60_000) {
+    return feeOracleCache.data;
+  }
+  try {
+    const res = await fetch(`${SUPPLY_ORACLE_URL}/api/supply/fee-oracle`);
+    if (!res.ok) return feeOracleCache.data;
+    const data = (await res.json()) as FeeOracleData;
+    feeOracleCache = { data: data as FeeOracleData, ts: now };
+    return data;
+  } catch {
+    return feeOracleCache.data;
+  }
+}
+
 interface TxSummary {
   signature: string;
   slot: number;
@@ -91,12 +118,21 @@ export async function transactionsRoutes(app: FastifyInstance) {
           })
         );
 
+        const feeOracle = await getFeeOracle();
         const result = {
           signature,
           slot: tx.slot,
           blockTime: tx.blockTime,
           status: tx.meta?.err ? "failed" : "success",
           fee: tx.meta?.fee ?? 0,
+          feeOracle: feeOracle
+            ? {
+                recommendedFeeMYTH: feeOracle.recommendedFeeMYTH,
+                recommendedFeeLamports: feeOracle.recommendedFeeLamports,
+                feeUSD: feeOracle.feeUSD,
+                mythPriceUSD: feeOracle.mythPriceUSD,
+              }
+            : null,
           instructions,
           accounts,
           logs: tx.meta?.logMessages ?? [],

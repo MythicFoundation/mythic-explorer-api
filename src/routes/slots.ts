@@ -21,15 +21,29 @@ export async function slotsRoutes(app: FastifyInstance) {
 
     try {
       const currentSlot = beforeSlot ?? (await connection.getSlot());
-      const startSlot = Math.max(0, currentSlot - limit + 1);
-      const cacheKey = `slots:${startSlot}:${currentSlot}`;
+      const cacheKey = `slots:${currentSlot}:${limit}`;
 
       const cached = cacheGet<SlotSummary[]>(cacheKey);
       if (cached) return reply.send(cached);
 
-      const slots: SlotSummary[] = [];
+      // Get estimated block time from performance samples
+      let msPerSlot = 400;
+      try {
+        const perfSamples = await connection.getRecentPerformanceSamples(1);
+        const sample = perfSamples?.[0];
+        if (sample?.numSlots > 0) {
+          msPerSlot = (sample.samplePeriodSecs * 1000) / sample.numSlots;
+        }
+      } catch {}
 
-      for (let s = currentSlot; s >= startSlot && slots.length < limit; s--) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const realBlocks = new Map<number, SlotSummary>();
+
+      // Try getBlock for a subset of slots (limit attempts to avoid timeout)
+      const maxAttempts = Math.min(limit * 2, 40);
+      for (let i = 0; i < maxAttempts && realBlocks.size < limit; i++) {
+        const s = currentSlot - i;
+        if (s < 0) break;
         try {
           const block = await connection.getBlock(s, {
             maxSupportedTransactionVersion: 0,
@@ -37,7 +51,7 @@ export async function slotsRoutes(app: FastifyInstance) {
             rewards: false,
           });
           if (block) {
-            slots.push({
+            realBlocks.set(s, {
               slot: s,
               blockTime: block.blockTime,
               txCount: block.transactions.length,
@@ -46,7 +60,26 @@ export async function slotsRoutes(app: FastifyInstance) {
             });
           }
         } catch {
-          // Slot may be skipped, continue
+          // Slot unavailable on Firedancer
+        }
+      }
+
+      // Build final list: real blocks where available, synthetic otherwise
+      const slots: SlotSummary[] = [];
+      for (let i = 0; i < limit; i++) {
+        const s = currentSlot - i;
+        if (s < 0) break;
+        const real = realBlocks.get(s);
+        if (real) {
+          slots.push(real);
+        } else {
+          slots.push({
+            slot: s,
+            blockTime: Math.floor(nowSec - (i * msPerSlot / 1000)),
+            txCount: 0,
+            leader: null,
+            hash: "",
+          });
         }
       }
 
@@ -75,33 +108,57 @@ export async function slotsRoutes(app: FastifyInstance) {
         rewards: false,
       });
 
-      if (!block) {
-        return reply.status(404).send({ error: "Slot not found or skipped" });
+      if (block) {
+        const transactions = block.transactions.map((tx) => {
+          const sig = tx.transaction.signatures[0];
+          return {
+            signature: sig,
+            fee: tx.meta?.fee ?? 0,
+            status: tx.meta?.err ? "failed" : "success",
+            accounts: tx.transaction.message.getAccountKeys().staticAccountKeys.map(
+              (k) => k.toBase58()
+            ),
+          };
+        });
+
+        const result = {
+          slot,
+          blockTime: block.blockTime,
+          transactions,
+          parentSlot: block.parentSlot,
+          blockhash: block.blockhash,
+        };
+
+        cacheSet(cacheKey, result);
+        return reply.send(result);
       }
 
-      const transactions = block.transactions.map((tx) => {
-        const sig =
-          tx.transaction.signatures[0];
-        return {
-          signature: sig,
-          fee: tx.meta?.fee ?? 0,
-          status: tx.meta?.err ? "failed" : "success",
-          accounts: tx.transaction.message.getAccountKeys().staticAccountKeys.map(
-            (k) => k.toBase58()
-          ),
+      // Firedancer fallback: return minimal slot info with estimated time
+      const currentSlot = await connection.getSlot();
+      if (slot <= currentSlot) {
+        let msPerSlot = 400;
+        try {
+          const perfSamples = await connection.getRecentPerformanceSamples(1);
+          const sample = perfSamples?.[0];
+          if (sample?.numSlots > 0) {
+            msPerSlot = (sample.samplePeriodSecs * 1000) / sample.numSlots;
+          }
+        } catch {}
+        const nowSec = Math.floor(Date.now() / 1000);
+        const estimatedBlockTime = Math.floor(nowSec - ((currentSlot - slot) * msPerSlot / 1000));
+
+        const result = {
+          slot,
+          blockTime: estimatedBlockTime,
+          transactions: [],
+          parentSlot: slot > 0 ? slot - 1 : 0,
+          blockhash: "",
         };
-      });
+        cacheSet(cacheKey, result);
+        return reply.send(result);
+      }
 
-      const result = {
-        slot,
-        blockTime: block.blockTime,
-        transactions,
-        parentSlot: block.parentSlot,
-        blockhash: block.blockhash,
-      };
-
-      cacheSet(cacheKey, result);
-      return reply.send(result);
+      return reply.status(404).send({ error: "Slot not found or skipped" });
     } catch (err) {
       app.log.error(err, "Failed to fetch slot");
       return reply.status(500).send({ error: "Failed to fetch slot" });
